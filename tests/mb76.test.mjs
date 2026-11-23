@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('../MasseBot-Test-76.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../massebot.js', import.meta.url), 'utf8');
 function section(first, last) {
   const start = source.indexOf(first);
   const end = source.indexOf(last, start);

@@ -9,7 +9,7 @@ if (origin.protocol !== 'https:' || origin.href !== origin.origin + '/') {
 }
 
 const version = '76.0.0';
-const source = await readFile(new URL('../MasseBot-Test-76.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../massebot.js', import.meta.url), 'utf8');
 const metadata = `// ==UserScript==
 // @name         MasseBot
 // @namespace    https://github.com/Masse136/MasseBot
