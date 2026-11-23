@@ -11,13 +11,9 @@ Installera [MasseBot i Tampermonkey](https://mb75-updates-m136.butterycone8.chat
 Kör snippetet på Minibia när spelklienten har laddat klart.
 
 ```js
-fetch('https://raw.githubusercontent.com/Masse136/MasseBot/refs/heads/main/massebot.js', { cache: 'no-store' })
-  .then(response => {
-    if (!response.ok) throw new Error(`MasseBot: HTTP ${response.status}`);
-    return response.text();
-  })
-  .then(code => (0, eval)(code))
-  .catch(console.error);
+fetch("https://raw.githubusercontent.com/Masse136/MasseBot/refs/heads/main/massebot.js")
+  .then((response) => response.text())
+  .then((code) => eval(code));
 ```
 
 ## Publicering
