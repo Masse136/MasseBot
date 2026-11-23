@@ -93,7 +93,7 @@ test('the packaged userscript waits visibly and starts once the game panel is vi
     assert.match(response.headers.get('X-Robots-Tag'), /noindex/);
     const script = await response.text();
     const metadata = await worker.fetch(new Request(origin + '/massebot.meta.js')).text();
-    assert.match(metadata, /@version\s+76\.0\.0/);
+    assert.match(metadata, /@version\s+77\.0\.0/);
     assert.ok(script.startsWith(metadata) && script.includes(source));
     new vm.Script(script);
 
