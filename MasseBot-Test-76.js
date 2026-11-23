@@ -258,7 +258,10 @@ class MB2ActionCoordinator {
     if (this._requestGuard) {
       let allowed = true;
       try { allowed = this._requestGuard({ channel, owner, priority, ttlMs }) !== false; }
-      catch (e) { this._diag.warn("action-guard", { channel, owner, error: String(e) }); }
+      catch (e) {
+        allowed = false;
+        this._diag.warn("action-guard", { channel, owner, error: String(e) });
+      }
       if (!allowed) {
         this._events.emit("action:blocked", { channel, owner, priority, reason: "safety-hold" });
         return false;
@@ -10214,7 +10217,10 @@ register("Item",()=>typeof Item!=="undefined"?Item:null,{"getPattern":"ArbubJKBV
       status="IDENTIFYING_CLIENT";
       const recovered=await MB2AutoStartup.resolve({build:expectedBuild,id:boot.id,origin:location.origin},lookup);
       if(startupCancelled||globalThis.__ccBoot?.id!==packageId||globalThis.__CLIENT_BUILD!==expectedBuild)throw Error("Klientpaketet ändrades eller uppstarten avbröts. Kör snippeten igen.");
-      configure(recovered.result.binding);await recovered.commit();autoStats=recovered.result.stats;sourceUrl=recovered.source+":"+expectedBuild+"/"+boot.id;status="READY";return;
+      configure(recovered.result.binding);
+      await recovered.commit();
+      if(startupCancelled)throw Error("Klientanalysen avbröts.");
+      autoStats=recovered.result.stats;sourceUrl=recovered.source+":"+expectedBuild+"/"+boot.id;status="READY";return;
     }
     if(typeof fetch!=="function")throw Error("Webbläsaren kan inte läsa klientens symbolfil.");
     const expected=new URL("/b/"+expectedBuild+"/c/"+boot.id+"/tripwires.js",location.origin);
@@ -10230,12 +10236,19 @@ register("Item",()=>typeof Item!=="undefined"?Item:null,{"getPattern":"ArbubJKBV
       text=await response.text();
     }finally{clearTimeout(timer);}
     const binding=MB2ClientPackageReader.read(text);
-    if(globalThis.__ccBoot?.id!==packageId||globalThis.__CLIENT_BUILD!==expectedBuild)throw Error("Klientpaketet ändrades under uppstarten. Kör snippeten igen.");
+    if(startupCancelled||globalThis.__ccBoot?.id!==packageId||globalThis.__CLIENT_BUILD!==expectedBuild)throw Error("Klientpaketet ändrades eller uppstarten avbröts.");
     configure(binding);status="READY";
   }
   function prepare(){
     if(status==="READY")return Promise.resolve();
-    if(!preparing)preparing=discover().catch(e=>{status="FAILED";failure=String(e.stack||e);throw e;});
+    if(preparing)return preparing;
+    startupCancelled=false;
+    failure=null;
+    preparing=discover().catch(error=>{
+      status="FAILED";
+      failure=String(error.stack||error);
+      throw error;
+    }).finally(()=>{preparing=null;});
     return preparing;
   }
   function type(name){return modern?types.get(name):legacy[name]?.();}
@@ -10249,7 +10262,7 @@ register("Item",()=>typeof Item!=="undefined"?Item:null,{"getPattern":"ArbubJKBV
 // Visible startup state, including failures before the main bot window exists.
 class MB2StartupNotice {
   static clear(){if(typeof document!=="undefined")document.getElementById("massebot-startup")?.remove();}
-  static show(message,error=null){
+  static show(message,error=null,retry=null){
     if(typeof document==="undefined")return;
     this.clear();
     const host=document.createElement("div");host.id="massebot-startup";
@@ -10257,9 +10270,15 @@ class MB2StartupNotice {
     style.textContent=":host{position:fixed;top:24px;left:24px;z-index:2147483647;color:#f5f5f5;font:14px Arial,sans-serif}section{width:min(620px,calc(100vw - 72px));background:#17202d;border:2px solid #dba045;border-radius:10px;padding:16px;box-shadow:0 10px 40px #0009}h2{font-size:17px;margin:0 0 10px}p{line-height:1.4}textarea{box-sizing:border-box;width:100%;height:220px;background:#0c1119;color:white;padding:8px;font:12px monospace}button{margin:10px 10px 0 0;padding:8px 12px;cursor:pointer}";
     const title=document.createElement("h2"),text=document.createElement("p");title.textContent="MasseBot 2 – "+MB2_VERSION;text.textContent=message;box.append(title,text);
     if(error){
-      const report={bot:"Test 75",currentBuild:globalThis.__CLIENT_BUILD??null,clientPackage:globalThis.__ccBoot??null,binding:MB2Native.snapshot(),error:String(error.message||error),stack:String(error.stack||error)};
+      const report={bot:MB2_VERSION,currentBuild:globalThis.__CLIENT_BUILD??null,clientPackage:globalThis.__ccBoot??null,binding:MB2Native.snapshot(),error:String(error.message||error),stack:String(error.stack||error)};
       const area=document.createElement("textarea"),copy=document.createElement("button");area.readOnly=true;area.value=JSON.stringify(report,null,2);area.setAttribute("aria-label","Startrapport");copy.textContent="Kopiera rapport";
       copy.addEventListener("click",async()=>{area.focus();area.select();try{await navigator.clipboard.writeText(area.value);copy.textContent="Kopierat";}catch(_){copy.textContent="Markerat – tryck Ctrl+C";}});box.append(area,copy);
+    }
+    if(retry){
+      const button=document.createElement("button");
+      button.textContent="Försök igen";
+      button.addEventListener("click",retry);
+      box.append(button);
     }
     const close=document.createElement("button");close.textContent="Stäng";close.addEventListener("click",()=>host.remove());box.append(close);shadow.append(style,box);(document.body||document.documentElement).append(host);
   }
@@ -13158,7 +13177,7 @@ class MB2CaveRouteStore {
   }
 
   _lsSet(key, value) {
-    if(this.storage)this.storage.set(key,value);
+    return this.storage?.set(key,value)===true;
   }
 
   _sharedGet(key) {
@@ -13350,10 +13369,26 @@ class MB2CaveRouteStore {
   }
 
   save(reason = "save") {
-    this._lsSet(this.key, JSON.stringify(this.route));
-    this._lsSet(this.settingsKey, JSON.stringify(this.settings));
-    this.events.emit("cave:routeChanged", { reason, count: this.route.length });
-    return true;
+    const previousRoute=this._lsGet(this.key);
+    const previousSettings=this._lsGet(this.settingsKey);
+    const route=JSON.stringify(this.route);
+    const settings=JSON.stringify(this.settings);
+    const routeChanged=route!==previousRoute;
+    const routeSaved=!routeChanged||this._lsSet(this.key,route);
+    const saved=routeSaved&&(settings===previousSettings||this._lsSet(this.settingsKey,settings));
+    this.saveError=null;
+    if(!saved){
+      const restored=!routeSaved||!routeChanged||(previousRoute===null
+        ? this.storage.remove(this.key)
+        : this._lsSet(this.key,previousRoute));
+      this.saveError=restored
+        ? "Rutten kunde inte sparas. Kopiera rutten innan du laddar om sidan."
+        : "Rutten kunde inte sparas helt. Kopiera rutten och kontrollera den efter omladdning.";
+      this.diag?.warn("cave:route-save-failed",{reason,restored});
+    }
+    // Notify the runner and editor about in-memory changes, even after a write error.
+    this.events.emit("cave:routeChanged", { reason, count: this.route.length, saved });
+    return saved;
   }
 
   normalize(wp) {
@@ -27411,8 +27446,12 @@ class MB2CaveUI {
   .switchline{display:flex;gap:8px;align-items:center}
 </style>
 <div class="page-title"><h2>Cave</h2><span class="sub">route + action engine</span></div>
+<p data-route-save-error class="pause-banner" role="status" hidden></p>
 <div class="cave-root" data-cave="tabs"></div>`;
 
+    const warning=host.querySelector("[data-route-save-error]");
+    warning.textContent=this.bot.cave.store.saveError||"";
+    warning.hidden=!warning.textContent;
     const area = host.querySelector('[data-cave="tabs"]');
     this.ui.createSubtabs(area, [
       {id:"route",label:"Route",render:b=>this._routeTab(b)},
@@ -27425,6 +27464,11 @@ class MB2CaveUI {
   _refreshState() {
     if(this.ui.activeTab!=="cave")return;
     const root=this.ui.shadow,state=this.bot.cave.state();if(!root)return;
+    const saveError=root.querySelector("[data-route-save-error]");
+    if(saveError){
+      saveError.textContent=this.bot.cave.store.saveError||"";
+      saveError.hidden=!saveError.textContent;
+    }
     const rec=this.bot.cave.recorder?.state,button=root.querySelector('[data-cmd="record"]'),status=root.querySelector('[data-record-status]');
     if(button){button.textContent=rec?.active?"Stop recording":"Record";button.classList.toggle("good",!!rec?.active);}
     if(status)status.textContent=rec?.active?"● REC · "+rec.count+" WP added · walk manually":rec?.message||"Records walking, corners and confirmed rope/stair/portal actions. Unknown teleports stop recording.";
@@ -29390,7 +29434,7 @@ class MB2DamageUI {
 
 // ===== src/15-bootstrap.js =====
 /* MasseBot 2 - bootstrap and public API */
-const MB2_VERSION = "Test 75";
+const MB2_VERSION = "Test 76";
 
 function MB2CreateInstance(options = {}) {
   const diagnostics = new MB2Diagnostics(750);
@@ -29746,7 +29790,7 @@ function MB2CreateInstance(options = {}) {
     }).catch(e=>{
       if(bootCancelled||global.MasseBot2!==api)return;
       hostState="FAIL";hostDiag.error("host:client-binding",{error:String(e),stack:String(e&&e.stack||e)});
-      MB2StartupNotice.show("Klientkopplingen kunde inte läsas. Kopiera rapporten och skicka den i chatten.",e);
+      MB2StartupNotice.show("Klientkopplingen kunde inte läsas. Försök igen eller kopiera rapporten.",e,()=>api.install());
     }).finally(()=>{clientStartup=null;});
   };
   const api={

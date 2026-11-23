@@ -1,6 +1,6 @@
 # MasseBot
 
-`MasseBot-Test-75.js` är den kompletta källkoden för Test 75.
+`MasseBot-Test-76.js` är den kompletta källkoden för Test 76.
 
 ## Installation
 

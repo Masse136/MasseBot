@@ -8,8 +8,8 @@ if (origin.protocol !== 'https:' || origin.href !== origin.origin + '/') {
   throw new Error('Supply the HTTPS release origin without a path.');
 }
 
-const version = '75.0.1';
-const source = await readFile(new URL('../MasseBot-Test-75.js', import.meta.url), 'utf8');
+const version = '76.0.0';
+const source = await readFile(new URL('../MasseBot-Test-76.js', import.meta.url), 'utf8');
 const metadata = `// ==UserScript==
 // @name         MasseBot
 // @namespace    https://github.com/Masse136/MasseBot
@@ -28,21 +28,36 @@ const bootstrap = `(function () {
   'use strict';
   if (!/^\\/play\\/?$/.test(location.pathname) || window.MasseBot2) return;
 
+  const waitingSince = Date.now();
+  let sawLoader = false;
+  let notice;
+
   const timer = setInterval(() => {
     if (window.MasseBot2) {
       clearInterval(timer);
+      notice?.remove();
       return;
     }
-    if (!window.__CLIENT_BUILD || !window.__ccBoot ||
-        document.querySelector('.loader-wrapper')) return;
-
-    // The launcher handle may disappear after boot. The client explicitly
-    // shows the login or game panel once it finishes loading.
+    const loader = document.querySelector('.loader-wrapper');
+    sawLoader ||= Boolean(loader);
     const login = document.getElementById('login-wrapper');
     const game = document.getElementById('game-wrapper');
-    if (login?.style.display !== 'flex' && game?.style.display !== 'flex') return;
-    clearInterval(timer);
-    start();
+    const loginReady = (sawLoader || Boolean(login?.style.display)) && login?.getClientRects().length;
+    const clientReady = window.__CLIENT_BUILD && window.__ccBoot && !loader &&
+      (game?.getClientRects().length || loginReady);
+    if (clientReady) {
+      clearInterval(timer);
+      notice?.remove();
+      start();
+      return;
+    }
+    if (!notice && Date.now() - waitingSince >= 15000 && document.body) {
+      notice = document.createElement('div');
+      notice.setAttribute('role', 'status');
+      notice.style.cssText = 'position:fixed;top:24px;left:24px;z-index:2147483647;max-width:calc(100vw - 48px);padding:12px;background:#17202d;color:white;font:14px Arial,sans-serif';
+      notice.textContent = 'MasseBot väntar på att Minibia ska laddas klart.';
+      document.body.append(notice);
+    }
   }, 250);
 
   function start() {
