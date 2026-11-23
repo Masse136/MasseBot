@@ -8,7 +8,7 @@ if (origin.protocol !== 'https:' || origin.href !== origin.origin + '/') {
   throw new Error('Supply the HTTPS release origin without a path.');
 }
 
-const version = '75.0.0';
+const version = '75.0.1';
 const source = await readFile(new URL('../MasseBot-Test-75.js', import.meta.url), 'utf8');
 const metadata = `// ==UserScript==
 // @name         MasseBot
@@ -33,8 +33,14 @@ const bootstrap = `(function () {
       clearInterval(timer);
       return;
     }
-    if (!window.__CLIENT_BUILD || !window.__ccBoot || !window.__launcherUI ||
+    if (!window.__CLIENT_BUILD || !window.__ccBoot ||
         document.querySelector('.loader-wrapper')) return;
+
+    // The launcher handle may disappear after boot. The client explicitly
+    // shows the login or game panel once it finishes loading.
+    const login = document.getElementById('login-wrapper');
+    const game = document.getElementById('game-wrapper');
+    if (login?.style.display !== 'flex' && game?.style.display !== 'flex') return;
     clearInterval(timer);
     start();
   }, 250);
