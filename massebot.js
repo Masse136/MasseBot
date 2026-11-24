@@ -6807,20 +6807,15 @@ class MB2AutoResolver {
     fn(n,owner,ownerRoot);for(const [k,v]of Object.entries(n)){if(k==='start'||k==='end')continue;if(Array.isArray(v))v.forEach(x=>this.owned(x,fn,owner,ownerRoot));else if(v&&typeof v==='object')this.owned(v,fn,owner,ownerRoot);}}
   static async run(schema,meta,progress=()=>{}){
     if(!/^\d{4}-\d{2}-\d{2}-\d{4}$/.test(meta.build)||!/^[a-f0-9]{8,32}$/i.test(meta.id))throw Error('Okänt klientpaketformat.');
-    if (
-      (meta.build === '2026-11-22-1005' && meta.id === '1e82628d') ||
-      (meta.build === '2026-11-23-1039' && meta.id === '1e9ac987')
-    ) {
-      schema = {
-        ...schema,
-        critical: schema.critical.map(entry =>
-          entry.file === 'src/network/protocol.js' &&
-          entry.ctor === 'VQdQITHjhR' && entry.key === null
-            ? { ...entry, h: 'a66680d17c299b3618a5c6719bdb5521eee4ca332f5bdf4381fd6310f015a45f' }
-            : entry
-        )
-      };
-    }
+    // The verified six-argument HotbarUsePacket keeps the same existing
+    // argument positions and defaults its extra field to zero.
+    const criticalSpecs=schema.critical.map(entry=>{
+      const hashes=[entry.h];
+      if(entry.file==='src/network/protocol.js'&&entry.ctor==='VQdQITHjhR'&&entry.key===null){
+        hashes.push('a66680d17c299b3618a5c6719bdb5521eee4ca332f5bdf4381fd6310f015a45f');
+      }
+      return {...entry,hashes};
+    });
     const origin=new URL(meta.origin).origin;if(!/^https:\/\//.test(origin))throw Error('Klientanalys kräver HTTPS.');
     const stable=new Set(schema.stable),names=new Set(schema.names),shuffled=new Set(schema.shuffled),optional=new Set(schema.optional),candidates=[],functions=new Map();
     const start=Date.now();let next=0,done=0,totalBytes=0;
@@ -6840,7 +6835,7 @@ class MB2AutoResolver {
       for(let i=0;i<nodes.length;i+=32){await Promise.all(nodes.slice(i,i+32).map(async n=>{
         const h=await MB2AutoResolver.sha(JSON.stringify(MB2AutoResolver.norm(n,stable)));hashes.set(n,h);if(useful.has(h)){const a=groups.get(h)||[];a.push([...MB2AutoResolver.leaves(n),...owners.get(n)]);groups.set(h,a);}
       }));}
-      const defs=[],criticalHashes=new Set(schema.critical.filter(c=>c.file===row.file).map(c=>c.h));if(criticalHashes.size)MB2AutoResolver.walk(ast,n=>{
+      const defs=[],criticalHashes=new Set(criticalSpecs.filter(c=>c.file===row.file).flatMap(c=>c.hashes));if(criticalHashes.size)MB2AutoResolver.walk(ast,n=>{
         if(n.type==='VariableDeclarator'&&n.id?.type==='Identifier'&&n.init?.type==='FunctionExpression')defs.push({ctor:n.id.name,key:null,fn:n.init});
         if(n.type==='FunctionDeclaration'&&n.id)defs.push({ctor:n.id.name,key:null,fn:n});
         if(n.type==='AssignmentExpression'&&MB2AutoResolver.prop(n.left.object)==='prototype'&&n.right?.type==='FunctionExpression')defs.push({ctor:n.left.object.object.name,key:MB2AutoResolver.prop(n.left),fn:n.right});
@@ -6862,7 +6857,14 @@ class MB2AutoResolver {
     }
     const missing=[...names].filter(x=>!mapping.has(x)&&!optional.has(x));if(missing.length)throw Error('Klientkoppling kunde inte verifieras ('+missing.length+'): '+missing.slice(0,6).join(', '));
     const critical=[];
-    for(const expected of schema.critical){const ctor=mapping.get(expected.ctor),key=expected.key?mapping.get(expected.key):null;const defs=(functions.get(expected.file)||[]).filter(d=>d.ctor===ctor&&d.key===key);if(defs.length!==1||defs[0].h!==expected.h||!defs[0].raw)throw Error('Ändrad kritisk klientfunktion: '+expected.file+' / '+(expected.key||expected.ctor));critical.push({ctor,key,arity:defs[0].arity,hash:await this.sha(defs[0].raw)});}
+    for(const expected of criticalSpecs){
+      const ctor=mapping.get(expected.ctor),key=expected.key?mapping.get(expected.key):null;
+      const defs=(functions.get(expected.file)||[]).filter(d=>d.ctor===ctor&&d.key===key);
+      if(defs.length!==1||!expected.hashes.includes(defs[0].h)||!defs[0].raw){
+        throw Error('Ändrad kritisk klientfunktion: '+expected.file+' / '+(expected.key||expected.ctor));
+      }
+      critical.push({ctor,key,arity:defs[0].arity,hash:await this.sha(defs[0].raw)});
+    }
     const globals=schema.bind.globals.filter(([,v])=>mapping.has(v)).map(([old,v])=>[old,mapping.get(v)]),groups=[];
     for(const [oldCtor,ms]of schema.bind.groups){const ctor=mapping.get(oldCtor);if(!ctor)continue;const members=Object.create(null);for(const [old,v]of Object.entries(ms))if(mapping.has(v))members[old]=mapping.get(v);groups.push([ctor,members]);}
     return {binding:{root:mapping.get(schema.bind.root),globals,groups},critical,stats:{files:done,bytes:totalBytes,mapped:mapping.size,optionalSkipped:[...optional].filter(x=>!mapping.has(x)).length,matched,elapsedMs:Date.now()-start}};
