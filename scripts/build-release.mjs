@@ -8,7 +8,7 @@ if (origin.protocol !== 'https:' || origin.href !== origin.origin + '/') {
   throw new Error('Supply the HTTPS release origin without a path.');
 }
 
-const version = '76.0.0';
+const version = '77.0.0';
 const source = await readFile(new URL('../massebot.js', import.meta.url), 'utf8');
 const metadata = `// ==UserScript==
 // @name         MasseBot

@@ -12859,7 +12859,14 @@ class MB2MinibiaAdapter {
         events.emit("world:tileTransformed", { position: p && p.position ? adapter.plainPosition(p.position) : null, id: p && p.id });
       });
       for(const name of ["handleItemAdd","handleRemoveItem","handleItemReplace"]){
-        this.hooks.wrap(MB2Native.proto("PacketHandler"),name,function(args){events.emit("world:itemsChanged",{position:adapter.plainPosition(args[0]?.position),kind:name,at:Date.now()});});
+        const capture=name==="handleItemAdd"
+          ? args=>adapter.followingItemAlert?.capture(adapter.plainPosition(args[0]?.position))
+          : null;
+        this.hooks.wrap(MB2Native.proto("PacketHandler"),name,function(args,result,before){
+          const position=adapter.plainPosition(args[0]?.position),at=Date.now();
+          events.emit("world:itemsChanged",{position,kind:name,at});
+          if(before)adapter.followingItemAlert?.observe(position,before,at);
+        },capture);
       }
       this.hooks.wrap(MB2Native.proto("PacketHandler"),"handleCancelWalk",function(args,result,before){
         events.emit("movement:rejected",{position:adapter.plainPosition(args[0]),before,
@@ -23749,6 +23756,80 @@ class MB2ChancellorGuard {
   snapshot(){return {...this.state,lastReply:this.state.lastReply?{...this.state.lastReply}:null};}
 }
 
+class MB2FollowingItemAlert {
+  constructor(safety) {
+    this.safety=safety;
+    this.bot=safety.bot;
+    this.recent=new Map();
+    this.last=null;
+  }
+
+  _near(a,b) {
+    return a&&b&&a.z===b.z&&Math.max(Math.abs(a.x-b.x),Math.abs(a.y-b.y))===1;
+  }
+
+  _itemsAt(position) {
+    const tile=this.bot.world.getTile(position);
+    if(!tile?.id||tile.__isPlaceholder||!Array.isArray(tile.items))return null;
+    const entries=new Map();
+    for(const item of tile.items){
+      if(item?.isMoveable?.()!==true)continue;
+      const cid=Number(item.id);
+      if(!Number.isInteger(cid)||cid<=0)continue;
+      const type=this.bot.items.properties(item).type;
+      if(["corpse","splash","magicfield"].includes(type))continue;
+      const key=cid+":"+(Number(item.fluidType)||0);
+      const entry=entries.get(key)||{cid,count:0};
+      entry.count+=Math.max(1,Number(item.count)||1);
+      entries.set(key,entry);
+    }
+    return entries;
+  }
+
+  capture(position) {
+    if(this.safety.config.followingItem.enabled!==true||this.last||this.bot.runtime.status!=="READY"||
+       !this.bot.adapter.ownsCharacter())return null;
+    const player=this.bot.world.playerPosition();
+    if(!this._near(position,player))return null;
+    const items=this._itemsAt(position);
+    return items?{player,items}:null;
+  }
+
+  observe(position,before,at) {
+    if(this.safety.config.followingItem.enabled!==true||this.last)return;
+    const after=this._itemsAt(position);
+    if(!after)return;
+    const added=[...after].filter(([key])=>!before.items.has(key));
+    if(added.length!==1)return;
+    const [key,item]=added[0];
+    const previous=this.recent.get(key);
+    const moved=previous&&previous.player.z===before.player.z&&
+      (previous.player.x!==before.player.x||previous.player.y!==before.player.y);
+    const newTile=previous&&
+      (previous.position.x!==position.x||previous.position.y!==position.y);
+    // A missing tile provides no evidence that an item was removed.
+    const source=moved&&newTile&&at-previous.at<=10000&&at>=previous.at&&
+      previous.count===item.count?this._itemsAt(previous.position):null;
+    const appearances=source&&!source.has(key)?previous.appearances+1:1;
+    this.recent.delete(key);
+    this.recent.set(key,{position,player:before.player,at,count:item.count,appearances});
+    if(this.recent.size>32)this.recent.delete(this.recent.keys().next().value);
+    if(appearances<3)return;
+
+    this.last={cid:item.cid,name:this.bot.items.name(item.cid)||"CID "+item.cid,position,at};
+    this.bot.diagnostics.info("safety:followingItem",this.last);
+    this.safety._setAlarm("following-item",true);
+  }
+
+  resetEvidence(){this.recent.clear();}
+  clear() {
+    this.resetEvidence();
+    if(!this.last)return;
+    this.last=null;
+    this.safety._setAlarm("following-item",false);
+  }
+}
+
 class MB2SafetyController {
   constructor(bot) {
     this.bot = bot;
@@ -23764,6 +23845,7 @@ class MB2SafetyController {
         alarm: true,
         pinkSkullHardDisconnect: true
       },
+      followingItem: {enabled:false},
       lowMana: {
         enabled: false,
         threshold: 10,
@@ -23874,6 +23956,8 @@ class MB2SafetyController {
 
     this._load();
     this.chancellor=new MB2ChancellorGuard(this);
+    this.followingItem=new MB2FollowingItemAlert(this);
+    this.bot.adapter.followingItemAlert=this.followingItem;
     this._verificationWatching=!!this.config.verification.enabled;
     this._seedVerificationMessages();
     this._offs = [
@@ -23889,6 +23973,7 @@ class MB2SafetyController {
       bot.events.on("condition:changed", () => this.tick()),
       bot.events.on("supplies:checked", () => this.tick()),
       bot.events.on("inventory:exactCountChanged", e => this._onExactCountChanged(e)),
+      bot.events.on("player:teleported", () => this.followingItem.resetEvidence()),
       bot.events.on("cave:resumed", () => this._resetCavePauseOwnership()),
       bot.events.on("cave:stopped", () => this._resetCavePauseOwnership()),
       bot.events.on("cave:started", () => this._resetCavePauseOwnership())
@@ -23974,6 +24059,7 @@ class MB2SafetyController {
       o = o[parts[i]];
     }
     o[parts[parts.length - 1]] = value;
+    if(path==="followingItem.enabled")this.followingItem.clear();
     if(String(path)==="manaFluids.enabled"){
       this._manaFluidQuerySeq++;
       this.state.manaFluidCountBusy=false;
@@ -24043,6 +24129,7 @@ class MB2SafetyController {
 
   acknowledge() {
     this.state.acknowledged = true;
+    if(this.followingItem.last)this.followingItem.clear();
     this.sound.stop();
     this.bot.events.emit("safety:acknowledged", { reasons: [...this._alarms] });
   }
@@ -24731,7 +24818,8 @@ class MB2SafetyController {
         holdReasons: [...this._holds],
         alarmReasons: [...this._alarms],
         cavePauseReasons: [...this._caveReasons],
-        chancellor:this.chancellor.snapshot()
+        chancellor:this.chancellor.snapshot(),
+        followingItem:this.followingItem.last
       },
       manaFluidGuard:this.manaFluidStatus(),
       sound:this.sound.snapshot()
@@ -24745,6 +24833,8 @@ class MB2SafetyController {
     this.state.manaFluidCountBusy=false;
     this.state.manaFluidQueryStartedAt=0;
     this.chancellor?.destroy();
+    this.bot.adapter.followingItemAlert=null;
+    this.followingItem.resetEvidence();
     this.stopLoop();
     this.sound.destroy();
     this._offs.forEach(f => { try { f(); } catch (_) {} });
@@ -26538,7 +26628,8 @@ class MB2CoreUI {
       s.state.verificationWarningActive?"Verification approaching — "+s.state.verificationWarningSeconds+"s in the latest warning":"Verification freeze needs attention";
     const labels={"mana-fluids":`Mana Fluids: ${s.state.manaFluidCount} left (alarm at ${s.config.manaFluids.threshold})`,
       "low-mana":"Low mana","low-supplies":"Low supplies","verification":verificationLabel,
-      "chancellor":"Chancellor detected — Cave paused","staff":"Staff / GM detected","test":"Alarm test"};
+      "chancellor":"Chancellor detected — Cave paused","staff":"Staff / GM detected","test":"Alarm test",
+      "following-item":`${s.state.followingItem?.name||"Föremål"} har dykt upp nära dig flera gånger. Kontrollera marken i spelet.`};
     const soundWanted=(s.state.alarmReasons||[]).length>0;
     const acknowledged=!!s.state.acknowledged;
     const sound=s.sound;
@@ -26548,7 +26639,8 @@ class MB2CoreUI {
     const cave=this.bot.cave&&this.bot.cave.state();
     return{active:true,warning:!reasons.size,urgent:soundWanted&&!acknowledged,
       title:reasons.has("verification")?(s.state.verificationPromptActive?"VERIFICATION OPEN":s.state.verificationWarningActive?"VERIFICATION WARNING":"VERIFICATION FREEZE"):
-        reasons.has("chancellor")?"CHANCELLOR DETECTED":reasons.has("mana-fluids")?"MANA FLUIDS LOW":reasons.size?"MASSEBOT ALARM":"MANA FLUID COUNT UNAVAILABLE",
+        reasons.has("chancellor")?"CHANCELLOR DETECTED":reasons.has("mana-fluids")?"MANA FLUIDS LOW":
+        reasons.has("following-item")?"FOLLOWING ITEM":reasons.size?"MASSEBOT ALARM":"MANA FLUID COUNT UNAVAILABLE",
       message:reasons.size?[...reasons].map(r=>labels[r]||r).join(" · "):(g.error||"Last count is too old"),
       audioMessage:audioMessage+(cave&&cave.paused?" · Cave paused":""),
       canEnableSound:soundWanted&&!acknowledged&&!sound.ready,
@@ -29262,6 +29354,14 @@ class MB2SafetyUI {
           <label>Pink skull → hard DC</label><input type="checkbox" data-safe="verification.pinkSkullHardDisconnect" ${c.verification.pinkSkullHardDisconnect!==false?"checked":""}>
         </div>
         <div class="safe-note">Detects both verification and rune-check countdowns. New system lines in Console/channels are also checked; existing history is ignored when enabled. With Pause Cave off, warning and challenge detection only alerts; automation continues. Turning Pause Cave off releases this guard's pause immediately. Resume when clear applies when Pause Cave remains on. Alarms again when the verification window opens, even if the countdown was acknowledged. Respond in the game's verification window. The visual alert remains visible with Alarm off. Pink skull on YOUR character can hard-close the network connection straight to login.</div>`)}
+      ${this._box("Following Item",c.followingItem.enabled,!!s.state.followingItem,`
+        <div class="safe-form">
+          <label>Aktivera larm</label><input type="checkbox" data-safe="followingItem.enabled" ${c.followingItem.enabled?"checked":""}>
+        </div>
+        <div class="kv"><div class="k">Status</div><div class="v">${s.state.followingItem
+          ?this._e(s.state.followingItem.name+" · kontrollera marken i spelet")
+          :c.followingItem.enabled?"Bevakar föremål i närheten":"Av"}</div></div>
+        <div class="safe-note">Larmar när samma typ av flyttbart föremål försvinner och dyker upp nära dig på flera platser. Kvittera larmet efter kontroll.</div>`)}
       ${this._box("Chancellor Guard",c.staff.chancellor.enabled,s.state.chancellor.active,`
         <div class="safe-form">
           <label>Enabled</label><input type="checkbox" data-safe="staff.chancellor.enabled" ${c.staff.chancellor.enabled?"checked":""}>
@@ -29436,7 +29536,7 @@ class MB2DamageUI {
 
 // ===== src/15-bootstrap.js =====
 /* MasseBot 2 - bootstrap and public API */
-const MB2_VERSION = "Test 76";
+const MB2_VERSION = "Test 77";
 
 function MB2CreateInstance(options = {}) {
   const diagnostics = new MB2Diagnostics(750);
