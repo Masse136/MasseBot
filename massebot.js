@@ -13590,7 +13590,7 @@ class MB2CaveRouteStore {
     return !!(n&&this.profiles&&this.profiles[n]);
   }
 
-  saveProfile(name) {
+  saveProfile(name, route=this.route) {
     const n=String(name||"").trim();
     if(!n)throw new Error("Route profile needs a name");
     if(n.length>80)throw new Error("Route profile name is too long");
@@ -13599,16 +13599,16 @@ class MB2CaveRouteStore {
     const existing=this.profiles[n];
     const profile={
       name:n,
-      route:JSON.parse(JSON.stringify(this.route)),
+      route:JSON.parse(JSON.stringify(route)),
       createdAt:existing&&Number(existing.createdAt)||now,
       updatedAt:now,
       migrationSource:existing&&existing.migrationSource||null
     };
     this._writeRouteRecord(n,profile);
     this.profiles[n]=profile;
-    this._saveLastProfileName(n);
+    if(route===this.route)this._saveLastProfileName(n);
     this._profilesChanged();
-    this.events.emit("cave:profileSaved",{name:n,count:this.route.length,updatedAt:now,shared:true});
+    this.events.emit("cave:profileSaved",{name:n,count:route.length,updatedAt:now,shared:true});
     return this.profiles[n];
   }
 
@@ -13795,6 +13795,114 @@ class MB2CaveRouteStore {
       }
     });
     return{valid:errors.length===0,errors,warnings,labels:[...labels.entries()].map(([label,index])=>({label,index}))};
+  }
+
+  routeSection(first, last) {
+    if(!Number.isInteger(first)||!Number.isInteger(last)||first<1||last<first||last>this.route.length){
+      throw new Error("Välj ett giltigt intervall av waypointnummer.");
+    }
+    return this.route.slice(first-1,last);
+  }
+
+  exportSection(route) {
+    return JSON.stringify({version:1,route},null,2);
+  }
+
+  readSharedSection(name) {
+    const profile=this._readSharedProfiles()[name];
+    if(!profile?.route?.length)throw new Error("Välj en sparad rutt eller mall som innehåller waypoints.");
+    return this.exportSection(profile.route);
+  }
+
+  insertSection(text, before) {
+    if(!Number.isInteger(before)||before<1||before>this.route.length+1){
+      throw new Error("Ange ett waypointnummer mellan 1 och "+(this.route.length+1)+".");
+    }
+    let data;
+    try{
+      data=JSON.parse(String(text).replace(/^\uFEFF/,""),(key,value)=>{
+        if(["__proto__","constructor","prototype"].includes(key))throw new Error("Ogiltig nyckel");
+        return value;
+      });
+    }catch(_){throw new Error("Klistra in giltig waypoint-JSON från Cave.");}
+    const rows=Array.isArray(data)?data:data?.route;
+    if(!Array.isArray(rows)||!rows.length)throw new Error("JSON-filen innehåller inga waypoints.");
+
+    const originalIds=new Set(),sectionLabels=new Map();
+    const section=rows.map((row,i)=>{
+      const position=row?.position,params=row?.params;
+      if(!position||!["x","y","z"].every(key=>Number.isSafeInteger(position[key]))||
+         position.z<0||position.z>15||
+         (params!=null&&(typeof params!=="object"||Array.isArray(params)))){
+        throw new Error("Waypoint "+(i+1)+" har en ogiltig position eller inställning.");
+      }
+      const waypoint=this.normalize(row);
+      const type=String(row.type||"walk").toLowerCase();
+      if(waypoint.type!==type)throw new Error("Okänd waypointtyp på rad "+(i+1)+".");
+      const check=String(params?.checkType||"").trim();
+      if((check&&check!=="none"&&type!=="goto"&&type!=="supply-check")||
+         (type==="npc"&&params?.refillOnlyListed===true)){
+        throw new Error("Waypoint "+(i+1)+" använder ett rotationsvillkor som MasseBot inte stöder. Välj vanlig Route-export.");
+      }
+      if(row.id){
+        if(originalIds.has(waypoint.id))throw new Error("Avsnittet innehåller dubbla waypoint-ID:n.");
+        originalIds.add(waypoint.id);
+      }
+      const label=waypoint.label.trim().toLowerCase();
+      if(label){
+        if(sectionLabels.has(label))throw new Error("Avsnittet innehåller dubbla etiketter: "+waypoint.label);
+        sectionLabels.set(label,waypoint.label.trim());
+      }
+      return waypoint;
+    });
+
+    const atEnd=before===this.route.length+1;
+    this.events.emit("cave:beforeRouteImport");
+    const usedIds=new Set(this.route.map(wp=>wp.id));
+    const usedLabels=new Set(this.route.map(wp=>wp.label.trim().toLowerCase()).filter(Boolean));
+    const reservedLabels=new Set([...usedLabels,...sectionLabels.keys()]);
+    const newIds=new Map();
+    let serial=0;
+    const stamp=Date.now();
+    section.forEach((waypoint,i)=>{
+      const old=waypoint.id;
+      let id;
+      do{id="wp-section-"+stamp+"-"+(++serial);}while(usedIds.has(id)||originalIds.has(id));
+      usedIds.add(id);
+      if(rows[i].id)newIds.set(old,id);
+      waypoint.id=id;
+
+      const label=waypoint.label.trim(),key=label.toLowerCase();
+      if(!label||!usedLabels.has(key))return;
+      let suffix=2,alias;
+      do{alias=label+" ("+(suffix++)+")";}while(reservedLabels.has(alias.toLowerCase()));
+      reservedLabels.add(alias.toLowerCase());
+      waypoint.label=alias;
+      sectionLabels.set(key,alias);
+    });
+
+    const destinations=new Set([...usedLabels,...[...sectionLabels.values()].map(label=>label.toLowerCase())]);
+    const missing=new Set();
+    for(const {type,params} of section){
+      const linkLabel=field=>{
+        const label=String(params[field]||"").trim(),key=label.toLowerCase();
+        if(sectionLabels.has(key))params[field]=sectionLabels.get(key);
+        else if(label&&!destinations.has(key))missing.add(label);
+      };
+      if(type==="goto")linkLabel("targetLabel");
+      if(type==="supply-check"){
+        for(const branch of ["low","ok"]){
+          const idField=branch+"TargetId",id=String(params[idField]??"next").trim();
+          if(id==="next")continue;
+          if(newIds.has(id))params[idField]=newIds.get(id);
+          else if(id&&!usedIds.has(id))missing.add(id);
+          else if(!id)linkLabel(branch+"TargetLabel");
+        }
+      }
+    }
+    const index=atEnd?this.route.length:before-1;
+    this.route=[...this.route.slice(0,index),...section,...this.route.slice(index)];
+    return {waypoints:section,before:index+1,missing:[...missing],saved:this.save("insert-section")};
   }
 
   export() {
@@ -27489,6 +27597,8 @@ class MB2CaveUI {
     this._offIndex = null;
     this._unregister = null;
     this.editor = new MB2CaveWaypointEditor(bot, ui);
+    this.sectionDraft={json:"",name:"",profile:"",first:null,last:null,before:1};
+    this.sectionFeedback="";
   }
 
   install() {
@@ -27549,6 +27659,7 @@ class MB2CaveUI {
     const area = host.querySelector('[data-cave="tabs"]');
     this.ui.createSubtabs(area, [
       {id:"route",label:"Route",render:b=>this._routeTab(b)},
+      {id:"sections",label:"Avsnitt",render:b=>this._sectionsTab(b)},
       {id:"actions",label:"Actions",render:b=>this._actionsTab(b)},
       {id:"npc",label:"NPC",render:b=>this._npcTab(b)},
       {id:"debug",label:"Debug",render:b=>this._debugTab(b)}
@@ -27701,6 +27812,113 @@ class MB2CaveUI {
     this._refreshState();
   }
 
+
+  _sectionsTab(body) {
+    const cave=this.bot.cave,store=cave.store,draft=this.sectionDraft;
+    const count=store.route.length;
+    const selected=store.route.findIndex(wp=>wp.id===this.selectedId)+1;
+    body.innerHTML=`
+      <div class="panel-body" style="overflow:auto;height:100%;padding:8px">
+        <div class="panel">
+          <div class="panel-head">Kopiera ett waypointavsnitt</div>
+          <div class="panel-body">
+            <div class="cave-toolbar">
+              <label>Från WP <input type="number" data-section="first" min="1" max="${count}" style="width:65px"></label>
+              <label>Till WP <input type="number" data-section="last" min="1" max="${count}" style="width:65px"></label>
+              <button class="btn" data-section-copy>Kopiera JSON</button>
+            </div>
+            <div class="cave-toolbar">
+              <label>Mallnamn <input data-section="name" placeholder="T.ex. Depå i huset"></label>
+              <button class="btn" data-section-save>Spara som mall</button>
+            </div>
+            <div class="hint">Mallarna sparas bland delade rutter och kan användas av alla dina karaktärer i samma webbläsare.</div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:8px">
+          <div class="panel-head">Infoga i den aktuella rutten</div>
+          <div class="panel-body">
+            <div class="cave-toolbar">
+              <label>Sparad mall eller rutt <select data-section="profile"></select></label>
+              <button class="btn" data-section-template>Infoga vald mall</button>
+              <button class="btn" data-section-read>Visa JSON</button>
+            </div>
+            <label style="display:block">Waypoint-JSON
+              <textarea data-section="json" rows="8" style="display:block;width:100%" spellcheck="false"></textarea>
+            </label>
+            <div class="cave-toolbar">
+              <label>Infoga före WP <input type="number" data-section="before" min="1" max="${count+1}" style="width:65px"></label>
+              <button class="btn" data-section-first>Först</button>
+              <button class="btn" data-section-last>Sist</button>
+              <button class="btn" data-section-insert>Infoga från JSON</button>
+            </div>
+            <div class="hint">Placeringen gäller både mallen och JSON-fältet. Befintliga waypoints ligger kvar.</div>
+            <p role="status" data-section-status></p>
+          </div>
+        </div>
+      </div>`;
+    const q=selector=>body.querySelector(selector);
+    const profiles=q('[data-section="profile"]');
+    profiles.append(new Option("Välj mall eller rutt",""));
+    for(const profile of store.listProfiles())profiles.append(new Option(profile.name+" ("+profile.waypointCount+" WP)",profile.name));
+    const defaults={first:selected||1,last:count||1};
+    for(const input of body.querySelectorAll("[data-section]")){
+      const field=input.dataset.section;
+      input.value=draft[field]??defaults[field];
+      input.addEventListener("input",()=>{draft[field]=input.value;});
+    }
+    const say=message=>{
+      this.sectionFeedback=message;
+      q("[data-section-status]").textContent=message;
+    };
+    say(this.sectionFeedback);
+    const setJson=content=>{draft.json=content;q('[data-section="json"]').value=content;};
+    const section=()=>store.routeSection(Number(q('[data-section="first"]').value),Number(q('[data-section="last"]').value));
+    const run=(selector,action)=>{
+      q(selector).addEventListener("click",async()=>{
+        try{await action();}catch(error){say(String(error.message||error));}
+      });
+    };
+    q("[data-section-copy]").disabled=!count;
+    q("[data-section-save]").disabled=!count;
+    run("[data-section-copy]",async()=>{
+      const waypoints=section(),text=store.exportSection(waypoints);
+      setJson(text);
+      try{
+        await navigator.clipboard.writeText(text);
+        say(waypoints.length+" waypoints kopierade.");
+      }catch(_){
+        const area=q('[data-section="json"]');area.focus();area.select();
+        say("JSON är markerad. Tryck Ctrl+C för att kopiera.");
+      }
+    });
+    run("[data-section-save]",()=>{
+      const name=q('[data-section="name"]').value.trim(),waypoints=section();
+      if(store.hasProfile(name)&&!confirm('Ersätt den sparade rutten eller mallen "'+name+'"?'))return;
+      store.saveProfile(name,waypoints);
+      draft.profile=name;
+      this.sectionFeedback='Mallen "'+name+'" sparades med '+waypoints.length+' waypoints.';
+      this._rerenderCurrent();
+    });
+    run("[data-section-read]",()=>{
+      setJson(store.readSharedSection(profiles.value));
+      say("Mallen är klar att infoga.");
+    });
+    const setBefore=number=>{draft.before=number;q('[data-section="before"]').value=number;};
+    q("[data-section-first]").addEventListener("click",()=>setBefore(1));
+    q("[data-section-last]").addEventListener("click",()=>setBefore(store.route.length+1));
+    const insert=text=>{
+      if((cave.state().running||cave.recorder.state.active)&&!confirm("Stoppa Cave och infoga avsnittet?"))return;
+      const result=store.insertSection(text,Number(q('[data-section="before"]').value));
+      draft.before=result.before+result.waypoints.length;
+      this.selectedId=result.waypoints[0].id;
+      const message=result.waypoints.length+" waypoints infogade från plats "+result.before+".";
+      const missing=result.missing.length?" Kontrollera hopp som saknar mål: "+result.missing.join(", ")+".":"";
+      this.sectionFeedback=message+missing+(result.saved?"":" "+store.saveError);
+      this._rerenderCurrent();
+    };
+    run("[data-section-template]",()=>insert(store.readSharedSection(profiles.value)));
+    run("[data-section-insert]",()=>insert(q('[data-section="json"]').value));
+  }
 
   _renderRouteList(scope) {
     const list=scope.querySelector("[data-route-list]");if(!list)return;
@@ -29536,7 +29754,7 @@ class MB2DamageUI {
 
 // ===== src/15-bootstrap.js =====
 /* MasseBot 2 - bootstrap and public API */
-const MB2_VERSION = "Test 77";
+const MB2_VERSION = "Test 78";
 
 function MB2CreateInstance(options = {}) {
   const diagnostics = new MB2Diagnostics(750);
