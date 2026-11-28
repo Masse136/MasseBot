@@ -16,6 +16,12 @@ fetch("https://raw.githubusercontent.com/Masse136/MasseBot/refs/heads/main/masse
   .then((code) => eval(code));
 ```
 
+## Återanvända waypointavsnitt
+
+I **Cave → Avsnitt**, välj första och sista waypoint i husdelen och klicka på **Spara som mall**. Mallen sparas bland delade rutter för alla dina karaktärer i samma webbläsare. Öppna en jaktvariant, välj husmallen och klicka på **Först → Infoga vald mall**. Spara kombinationen med **Save Route** under **Route**.
+
+För att rita en jaktvariant på kartan kan du använda **Route → Copy JSON** i [Minibia Tools](https://github.com/jakoblindell/minibia-tools/). Klistra in exporten i **Cave → Avsnitt** och använd **Infoga från JSON**. **Sist** placerar den efter husdelen. Vanlig Route-export innehåller waypointlistan. Rotation-exporter kan även innehålla villkor som kräver stöd i boten.
+
 ## Publicering
 
 1. Uppdatera `massebot.js` på `main` för samma Snippets-länk och höj userscript-versionen i `scripts/build-release.mjs`.

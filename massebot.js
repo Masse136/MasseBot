@@ -13839,6 +13839,11 @@ class MB2CaveRouteStore {
       const waypoint=this.normalize(row);
       const type=String(row.type||"walk").toLowerCase();
       if(waypoint.type!==type)throw new Error("Okänd waypointtyp på rad "+(i+1)+".");
+      const check=String(params?.checkType||"").trim();
+      if((check&&check!=="none"&&type!=="goto"&&type!=="supply-check")||
+         (type==="npc"&&params?.refillOnlyListed===true)){
+        throw new Error("Waypoint "+(i+1)+" använder ett rotationsvillkor som MasseBot inte stöder. Välj vanlig Route-export.");
+      }
       if(row.id){
         if(originalIds.has(waypoint.id))throw new Error("Avsnittet innehåller dubbla waypoint-ID:n.");
         originalIds.add(waypoint.id);

@@ -112,3 +112,22 @@ test('unresolved jumps are reported and a failed save preserves the persisted ro
   assert.equal(events.at(-2)[0], 'cave:beforeRouteImport');
   assert.equal(events.at(-1)[1].saved, false);
 });
+
+test('Route Builder exports can follow the house section and unknown rotation conditions stop insertion', () => {
+  const { store, events } = routeStore();
+  store.route = [store.normalize(waypoint('house'))];
+  const exported = { version: 1, route: [
+    { id: 'walk-1', enabled: true, type: 'walk', label: '', position: { x: 124, y: 234, z: 7 }, params: {} },
+    { id: 'up-1', enabled: true, type: 'stairs-up', label: '', position: { x: 125, y: 234, z: 7 }, params: { transitionTarget: 'n' } },
+  ] };
+  const inserted = store.insertSection(JSON.stringify(exported), 2);
+  assert.equal(inserted.saved, true);
+  assert.deepEqual(Array.from(store.route, wp => wp.type), ['walk', 'walk', 'stairs-up']);
+  assert.equal(store.route[2].params.transitionTarget, 'n');
+
+  events.length = 0;
+  exported.route[0].params.checkType = 'sell-needed';
+  assert.throws(() => store.insertSection(JSON.stringify(exported), 2), /rotationsvillkor/);
+  assert.equal(store.route.length, 3);
+  assert.deepEqual(events, []);
+});
